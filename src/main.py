@@ -157,8 +157,9 @@ class AppSerial(object):
         try:
             self.sport_obj.port = port_name
             self.sport_obj.timeout = 0 # noblock read 
-            self.sport_obj.port.open()
+            self.sport_obj.open()
         except Exception as ex_msg:
+            print('sport open err', ex_msg)
             return False
         return True
     
@@ -169,14 +170,16 @@ class AppSerial(object):
         try:
             self.sport_obj.write(data)
         except Exception as ex_msg:
+            print('sport write err', ex_msg)
             self.sport_obj.close()
             return False
         return True
 
     def read(self):
         try:
-            data = self.sport_obj.read()
+            data = self.sport_obj.read(1000)
         except Exception as ex_msg:
+            print('sport read err', ex_msg)
             return None, False
         return data, True
 
@@ -202,7 +205,7 @@ class AppSerial(object):
         try:
             self.sport_obj.port = port_name
             self.sport_obj.timeout =None # block read 
-            self.sport_obj.port.open()
+            self.sport_obj.open()
             self.__io_exception = False
             self.__read_thread_obj = threading.Thread(target=self._recv_task, name="reveive handle")
             self.__read_thread_obj.setDaemon(True) # 设置为后台线程
@@ -255,19 +258,83 @@ def arg_parse_setup(args=None):
     else:
         return parser.parse_args() 
 
+    
+class CmdSendCtrl(object):
+    def __init__(self):
+        super().__init__() # 一定要显示调用父类初始化方法(也就是构造方法)，python不会自动调用
+        self.STA_IDLE, self.STA_SEND_CMD, self.SEND_DELAY = range(3)
+        self.__index = 0
+        self.__sta = self.STA_IDLE
+        self.__ctrl_tab = None
+        self.__ctrl_tab_len = 0
+        self.__cmd_wr_if = None
+        self.__cmd_send_delay = 0
+
+        self.__tmst = datetime.now()
+        self.__inject_cmd = None
+        self.__inject_cmd_ongoing = False
+        
+    def start(self, ctrl_tab, cmd_wr_if):
+        self.__sta = self.STA_IDLE
+        self.__index = 0
+        self.__ctrl_tab = ctrl_tab
+        self.__ctrl_tab_len = 0
+        self.__cmd_wr_if = cmd_wr_if
+        if self.__ctrl_tab:
+            self.__ctrl_tab_len = len(self.__ctrl_tab)
+        if (self.__ctrl_tab_len > 0) and self.__cmd_wr_if:
+            self.__sta = self.STA_SEND_CMD
+            return True
+        else:
+            return False
+
+    def inject_cmd_put(self, cmd):
+        self.__inject_cmd = cmd
+
+    def run(self):
+        ret = True
+        if self.__sta == self.STA_IDLE:
+            pass
+        elif self.__sta == self.STA_SEND_CMD:
+            if self.__inject_cmd:
+                msg = b'\xFF\xFF' + self.__inject_cmd[0] + b'\r\n'
+                self.__cmd_send_delay = self.__inject_cmd[1]
+                self.__inject_cmd = None
+                self.__inject_cmd_ongoing = True
+            else:
+                msg = b'\xFF\xFF' + self.__ctrl_tab[self.__index][0] + b'\r\n'
+                self.__cmd_send_delay = self.__ctrl_tab[self.__index][1]
+
+            ret = self.__cmd_wr_if(msg)
+            self.__tmst = datetime.now() # 记录发送时间戳
+            self.__sta = self.SEND_DELAY
+
+            print(self.__tmst, '->', msg)
+        elif self.__sta == self.SEND_DELAY:
+            if get_time_diff_milliseconds(datetime.now(), self.__tmst) > self.__cmd_send_delay:
+                if self.__inject_cmd_ongoing:
+                    self.__inject_cmd_ongoing = False
+                else:
+                    self.__index += 1
+                    if self.__index >= self.__ctrl_tab_len:
+                        self.__index = 0
+                self.__sta = self.STA_SEND_CMD
+        else:
+            self.__sta = self.STA_IDLE
+        return ret
+
 def task_run():
-    AT_COMMAND_CTRL = [
-        [b'at+rmsgadv=112233445566,5,1600', 5000, 1500 * 1000],
-        [b'at+rmsghex=0027001f,8,0204', 5000, 1000],
-        [b'at+rmsghex=0048002c,8,0204', 5000, 1000],
-        [b'at+rmsghex=0037002d,8,0204', 5000, 1000],
-        [b'at+rmsghex=0040004a,8,0204', 5000, 1000],
-        [b'at+rmsghex=003b0026,8,0204', 5000, 1000],
-        [b'at+rmsghex=004b0035,8,0204', 5000, 1000],
-        [b'at+rmsghex=0042001b,8,0204', 5000, 1000],
-        [b'at+rmsghex=002f002b,8,0204', 5000, 1000],
-        [b'at+rmsghex=003A003C,8,0204', 5000, 1000],
-        [b'at+rmsghex=003f0031,8,0204', 5000, 1000],
+    AT_COMMAND_CTRL2 = [
+        [b'at+rmsghex=0027001f,8,0204', 6000, 0],
+        [b'at+rmsghex=0048002c,8,0204', 6000, 0],
+        [b'at+rmsghex=0037002d,8,0204', 6000, 0],
+        [b'at+rmsghex=0040004a,8,0204', 6000, 0],
+        [b'at+rmsghex=003b0026,8,0204', 6000, 0],
+        [b'at+rmsghex=004b0035,8,0204', 6000, 0],
+        [b'at+rmsghex=0042001b,8,0204', 6000, 0],
+        [b'at+rmsghex=002f002b,8,0204', 6000, 0],
+        [b'at+rmsghex=003A003C,8,0204', 6000, 0],
+        [b'at+rmsghex=003f0031,8,0204', 6000, 0],
     ]
 
     args = arg_parse_setup()
@@ -279,40 +346,54 @@ def task_run():
 
     sport_read_line_parse = LineParse()
 
-    # sport = AppSerial()
-    # if not sport.open(args.port):
-    #     console_print('error', 'port open fail')
-    #     return
+    sport = AppSerial()
+    if not sport.open(args.port):
+        args.port = args.port.upper()
+        console_print('error', '{} open fail'.format(args.port))
+        return
 
     sport_read_recorder= PortRecvRecord(echo = args.echo)
     sport_read_recorder.open()
 
-    cmd_list_inx = 0
-    cmd_sta = 0
-
+    inject_cmd = [b'at+rmsgadv=112233445566,5,1600', 8000, 15 * 1000]
+    send_ctrl = CmdSendCtrl()
+    send_ctrl.inject_cmd_put(inject_cmd)
+    inject_cmd_put_tmst = datetime.now()
+    inject_cmd_delay = inject_cmd[2]
+    ret = send_ctrl.start(AT_COMMAND_CTRL2, sport.write)
+    if not ret:
+        print('send_ctrl start fail')
+        return
     try:
         while True:
-            # 如串口数据并记录
-            data, sta = b'abcd\nef', True # sport.read()
+            # 读串口数据并记录
+            data, sta = sport.read()#b'abcd\nef', True # 
             if sta:
                 lines = sport_read_line_parse.parse(data)
                 for l in lines: 
                     sport_read_recorder.write(l)
             else:
-                # sport.close()
+                sport.close()
                 sport_read_recorder.close()
+                return
 
-            # if cmd_sta == 0:
-            #     sport.write(b'\xFF\xFF' + AT_COMMAND_CTRL[cmd_list_inx] + b'\r\n')
+            if not send_ctrl.run():
+                print('send_ctrl run fail')
+                sport.close()
+                sport_read_recorder.close()
+                return
+
+            if get_time_diff_milliseconds(datetime.now(), inject_cmd_put_tmst) > inject_cmd_delay:
+                send_ctrl.inject_cmd_put(inject_cmd)
+                inject_cmd_put_tmst = datetime.now()
             
-
-            time.sleep(0.1)
+            time.sleep(1)
     except Exception as ex_msg:
-        print('err', ex_msg)
+        print('err main', ex_msg)
     except KeyboardInterrupt:
-        print('err', 'KeyboardInterrupt')
+        print('err main', 'KeyboardInterrupt')
     finally:
-        # sport.close()
+        sport.close()
         sport_read_recorder.close()
 
 
