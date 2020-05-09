@@ -49,11 +49,11 @@ def get_serial_port(portname, baud, bytesize, parity, stopbits):
     return port
 
 def get_time_diff_seconds(t1, t2):
-    diff = t1 - t2;
+    diff = t1 - t2
     return diff.total_seconds()
 
 def get_time_diff_milliseconds(t1, t2):
-    diff = t1 - t2;
+    diff = t1 - t2
     return diff.total_seconds() * 1000
 
 def datetime_test():
@@ -193,7 +193,7 @@ class AppSerial(object):
                     dat = self.sport_obj.readline()
                     self.__line_queue.put(dat)
         except Exception as ex_msg:
-            self.__io_exception = True;
+            self.__io_exception = True
 
     def mopen(self, port_name):
         if(self.sport_obj.isOpen()):
@@ -251,6 +251,7 @@ def arg_parse_setup(args=None):
     parser.add_argument('-v','--version', action='version', version=Version)
     parser.add_argument('-l', '--list', dest='list', action="store_true", help="list the current serial device of the system")
     parser.add_argument("-p", '--port', metavar='COMxx', dest='port', default=None, help="specify communication serial port name, such as COM1")
+    parser.add_argument("-c", '--count', metavar='', dest='count', default=None, help="specify the count of command list executing")
     parser.add_argument('-e', '--echo', dest='echo', action="store_true", help="echo enable")
 
     if args:
@@ -265,6 +266,8 @@ class CmdSendCtrl(object):
         self.STA_IDLE, self.STA_SEND_CMD, self.SEND_DELAY = range(3)
         self.__index = 0
         self.__sta = self.STA_IDLE
+        self.__cnt_max = 0
+        self.__cnt = 0
         self.__ctrl_tab = None
         self.__ctrl_tab_len = 0
         self.__cmd_wr_if = None
@@ -274,8 +277,10 @@ class CmdSendCtrl(object):
         self.__inject_cmd = None
         self.__inject_cmd_ongoing = False
         
-    def start(self, ctrl_tab, cmd_wr_if):
+    def start(self, ctrl_tab, cmd_wr_if, loop_cnt):
         self.__sta = self.STA_IDLE
+        self.__cnt = 0
+        self.__cnt_max = loop_cnt
         self.__index = 0
         self.__ctrl_tab = ctrl_tab
         self.__ctrl_tab_len = 0
@@ -312,15 +317,20 @@ class CmdSendCtrl(object):
             print(self.__tmst, '->', msg)
         elif self.__sta == self.SEND_DELAY:
             if get_time_diff_milliseconds(datetime.now(), self.__tmst) > self.__cmd_send_delay:
+                self.__sta = self.STA_SEND_CMD
                 if self.__inject_cmd_ongoing:
                     self.__inject_cmd_ongoing = False
                 else:
                     self.__index += 1
                     if self.__index >= self.__ctrl_tab_len:
                         self.__index = 0
-                self.__sta = self.STA_SEND_CMD
+                        self.__cnt += 1
+                        if (self.__cnt_max > 0) and (self.__cnt >= self.__cnt_max):
+                            self.__sta = self.STA_IDLE
+                            ret = False
         else:
             self.__sta = self.STA_IDLE
+
         return ret
 
 def task_run():
@@ -337,12 +347,29 @@ def task_run():
         [b'at+rmsghex=003f0031,8,0204', 6000, 0],
     ]
 
+    AT_COMMAND_CTRL2 = []
+    cmd_addr_rand_tab = random.sample(range(1, 0xFFFFFFFF), 2)
+    for cmd_addr in cmd_addr_rand_tab:
+        cmd_port = 8
+        cmd_data = '0204'
+        cmd_all = 'at+rmsghex={:08x},{},{}'.format(cmd_addr, cmd_port, cmd_data)
+        cmd_item = [bytes(cmd_all, encoding='utf-8'), 6000, 0]
+        # print(cmd_item)
+        AT_COMMAND_CTRL2.append(cmd_item)
+
     args = arg_parse_setup()
+    print(args)
 
     if args.list:
         list_serial_device()
     if not args.port:
         return
+
+    if not args.count:
+        args.count = 0
+    else:
+        args.count = int(args.count)
+    print('args.count', args.count)
 
     sport_read_line_parse = LineParse()
 
@@ -355,12 +382,12 @@ def task_run():
     sport_read_recorder= PortRecvRecord(echo = args.echo)
     sport_read_recorder.open()
 
-    inject_cmd = [b'at+rmsgadv=112233445566,5,1600', 8000, 15 * 1000]
+    inject_cmd = [b'at+rmsgadv=112233445566,5,1600', 8000, 1500 * 1000]
     send_ctrl = CmdSendCtrl()
     send_ctrl.inject_cmd_put(inject_cmd)
     inject_cmd_put_tmst = datetime.now()
     inject_cmd_delay = inject_cmd[2]
-    ret = send_ctrl.start(AT_COMMAND_CTRL2, sport.write)
+    ret = send_ctrl.start(AT_COMMAND_CTRL2, sport.write, args.count)
     if not ret:
         print('send_ctrl start fail')
         return
@@ -373,15 +400,15 @@ def task_run():
                 for l in lines: 
                     sport_read_recorder.write(l)
             else:
-                sport.close()
-                sport_read_recorder.close()
+                # sport.close()
+                # sport_read_recorder.close()
                 return
 
             if not send_ctrl.run():
                 print('send_ctrl run fail')
-                sport.close()
-                sport_read_recorder.close()
-                return
+                # sport.close()
+                # sport_read_recorder.close()
+                return # return 在try finally语句中时仍会执行finally内容
 
             if get_time_diff_milliseconds(datetime.now(), inject_cmd_put_tmst) > inject_cmd_delay:
                 send_ctrl.inject_cmd_put(inject_cmd)
@@ -390,11 +417,12 @@ def task_run():
             time.sleep(1)
     except Exception as ex_msg:
         print('err main', ex_msg)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt: # Exception 不能捕获KeyboardInterrupt
         print('err main', 'KeyboardInterrupt')
     finally:
         sport.close()
         sport_read_recorder.close()
+        print('test complete')
 
 
 if __name__ == '__main__':
