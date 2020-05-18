@@ -10,6 +10,7 @@ import argparse
 import colorama
 import serial
 from serial.tools import list_ports
+import json
 
 
 CONSOLE_LEVEL_FORE_COLOR_TAB = {
@@ -78,15 +79,18 @@ class PortRecvRecord(object):
     def write(self, data):
         if data:
             if self.__echo:
-                print(data.decode(self.__echo_coding, errors='ignore'))
+                console_print('debug',data.decode(self.__echo_coding, errors='ignore'))
             if self.__file_obj:
                 self.__file_obj.write(data + self.__new_line)
 
     def open(self, file_name=None):
         self.__file_name = file_name
         if not file_name:
-            self.__file_name = datetime.now().strftime('%Y-%m-%d %H_%M_%S.log')
-            print(self.__file_name)
+            log_dir = r'./log/'
+            if not os.path.isdir(log_dir):
+                os.makedirs(log_dir)
+            self.__file_name = log_dir + datetime.now().strftime('%Y-%m-%d %H_%M_%S.log')
+            print('log_file:', '\''+self.__file_name+'\'')
         self.__file_obj = open(self.__file_name, 'wb') # 如果为'w', 则write() argument must be str, not bytes
 
     def close(self):
@@ -253,6 +257,7 @@ def arg_parse_setup(args=None):
     parser.add_argument("-p", '--port', metavar='COMxx', dest='port', default=None, help="specify communication serial port name, such as COM1")
     parser.add_argument("-c", '--count', dest='count', default=None, help="specify the count of command list executing")
     parser.add_argument('-e', '--echo', dest='echo', action="store_true", help="echo enable")
+    parser.add_argument('config', metavar="PATH", nargs='?', default=None, help="configuration file path(JSON)")
 
     if args:
         return parser.parse_args(args.split())
@@ -274,7 +279,7 @@ class CmdSendCtrl(object):
         self.__cmd_send_delay = 0
 
         self.__tmst = datetime.now()
-        self.__inject_cmd = None
+        self.__inject_cmd_tab = []
         self.__inject_cmd_ongoing = False
         
     def start(self, ctrl_tab, cmd_wr_if, loop_cnt):
@@ -294,20 +299,23 @@ class CmdSendCtrl(object):
             return False
 
     def inject_cmd_put(self, cmd):
-        self.__inject_cmd = cmd
+        self.__inject_cmd_tab.append(cmd)
+
+    def inject_cmd_tab_put(self, cmd_tab):
+        self.__inject_cmd_tab += cmd_tab
 
     def run(self):
         ret = True
         if self.__sta == self.STA_IDLE:
             pass
         elif self.__sta == self.STA_SEND_CMD:
-            if self.__inject_cmd:
-                msg = b'\xFF\xFF' + self.__inject_cmd[0] + b'\r\n'
-                self.__cmd_send_delay = self.__inject_cmd[1]
-                self.__inject_cmd = None
+            if self.__inject_cmd_tab:
+                inject_cmd = self.__inject_cmd_tab.pop(0)
+                msg = b'\xFF\xFF' + inject_cmd[0].encode('ascii') + b'\r\n'
+                self.__cmd_send_delay = inject_cmd[1]
                 self.__inject_cmd_ongoing = True
             else:
-                msg = b'\xFF\xFF' + self.__ctrl_tab[self.__index][0] + b'\r\n'
+                msg = b'\xFF\xFF' + self.__ctrl_tab[self.__index][0].encode('ascii') + b'\r\n'
                 self.__cmd_send_delay = self.__ctrl_tab[self.__index][1]
 
             ret = self.__cmd_wr_if(msg)
@@ -333,29 +341,39 @@ class CmdSendCtrl(object):
 
         return ret
 
-def task_run():
-    AT_COMMAND_CTRL2 = [
-        [b'at+rmsghex=0027001f,8,0204', 6000, 0],
-        [b'at+rmsghex=0048002c,8,0204', 6000, 0],
-        [b'at+rmsghex=0037002d,8,0204', 6000, 0],
-        [b'at+rmsghex=0040004a,8,0204', 6000, 0],
-        [b'at+rmsghex=003b0026,8,0204', 6000, 0],
-        [b'at+rmsghex=004b0035,8,0204', 6000, 0],
-        [b'at+rmsghex=0042001b,8,0204', 6000, 0],
-        [b'at+rmsghex=002f002b,8,0204', 6000, 0],
-        [b'at+rmsghex=003A003C,8,0204', 6000, 0],
-        [b'at+rmsghex=003f0031,8,0204', 6000, 0],
-    ]
-
-    AT_COMMAND_CTRL2 = []
-    cmd_addr_rand_tab = random.sample(range(1, 0xFFFFFFFF), 2)
+def rilink_bove_regular_cmd_get(num = 10):
+    cmd_tab = []
+    cmd_addr_rand_tab = random.sample(range(1, 0xFFFFFFFF), num)
     for cmd_addr in cmd_addr_rand_tab:
         cmd_port = 8
         cmd_data = '0204'
         cmd_all = 'at+rmsghex={:08x},{},{}'.format(cmd_addr, cmd_port, cmd_data)
-        cmd_item = [bytes(cmd_all, encoding='utf-8'), 6000, 0]
+        cmd_item = [bytes(cmd_all, encoding='utf-8'), 6000]
         # print(cmd_item)
-        AT_COMMAND_CTRL2.append(cmd_item)
+        cmd_tab.append(cmd_item)
+
+
+def task_run():
+    cmd_demo = {
+        'regular':[
+            ['regular_cmd0', 6000],
+            ['regular_cmd1', 6000],
+            ['regular_cmd2', 6000],
+            ['regular_cmd3', 6000],
+            ['regular_cmd4', 6000],
+            ['regular_cmd5', 6000],
+            ['regular_cmd6', 6000],
+            ['regular_cmd7', 6000],
+            ['regular_cmd8', 6000],
+            ['regular_cmd9', 6000],
+        ],
+
+        'inject' : [
+             ['inject_cmd1', 1000, 10 * 1000],
+             ['inject_cmd2', 1000, 15 * 1000],
+             ['inject_cmd3', 1000, 20 * 1000],
+        ]
+    } 
 
     args = arg_parse_setup()
     print(args)
@@ -369,7 +387,36 @@ def task_run():
         args.count = 0
     else:
         args.count = int(args.count)
-    print('args.count', args.count)
+    # print('args.count', args.count)
+
+    # read json config
+    cfg_file = './config.json'
+    if args.config:
+        cfg_file = args.config
+    
+    try:
+        with open(cfg_file, 'r', encoding='utf-8') as f:
+            json_str = f.read()
+    except Exception as ex_msg:
+        console_print('error', 'config file open fail')
+        return
+
+    try:
+        config = json.loads(json_str)
+    except Exception as ex_msg:
+        console_print('error', 'config file format fail, please refer to demo.json')
+        demo_json_str = json.dumps(cmd_demo, indent=4)
+        with open('./config_demo.json', 'w', encoding='utf-8') as f:
+            f.write(demo_json_str)
+        return
+
+    # regular_cmd_tab = rilink_bove_regular_cmd_get(10)
+    regular_cmd_tab = config.get('regular', None)
+    inject_cmd_tab = config.get('inject', None)
+    # print(regular_cmd_tab, inject_cmd_tab)
+    
+    if not (regular_cmd_tab or inject_cmd_tab):
+        return
 
     sport_read_line_parse = LineParse()
 
@@ -382,15 +429,18 @@ def task_run():
     sport_read_recorder= PortRecvRecord(echo = args.echo)
     sport_read_recorder.open()
 
-    inject_cmd = [b'at+rmsgadv=112233445566,5,1600', 8000, 1500 * 1000]
     send_ctrl = CmdSendCtrl()
-    send_ctrl.inject_cmd_put(inject_cmd)
-    inject_cmd_put_tmst = datetime.now()
-    inject_cmd_delay = inject_cmd[2]
-    ret = send_ctrl.start(AT_COMMAND_CTRL2, sport.write, args.count)
+    if inject_cmd_tab:
+        inject_cmd_tab_len = len(inject_cmd_tab)
+        send_ctrl.inject_cmd_tab_put(inject_cmd_tab)
+        inject_cmd_tmst_tab = [datetime.now()]
+        inject_cmd_tmst_tab *= inject_cmd_tab_len
+
+    ret = send_ctrl.start(regular_cmd_tab, sport.write, args.count)
     if not ret:
         print('send_ctrl start fail')
         return
+    console_print('info', 'test start, press CTRL + C can stop the test')
     try:
         while True:
             # 读串口数据并记录
@@ -410,11 +460,16 @@ def task_run():
                 # sport_read_recorder.close()
                 return # return 在try finally语句中时仍会执行finally内容
 
-            if get_time_diff_milliseconds(datetime.now(), inject_cmd_put_tmst) > inject_cmd_delay:
-                send_ctrl.inject_cmd_put(inject_cmd)
-                inject_cmd_put_tmst = datetime.now()
-            
-            time.sleep(1)
+            if inject_cmd_tab:
+                for i in range(inject_cmd_tab_len):
+                    inject_cmd = inject_cmd_tab[i]
+                    inject_cmd_delay = inject_cmd[2]
+                    inject_cmd_tmst = inject_cmd_tmst_tab[i]
+                    if get_time_diff_milliseconds(datetime.now(), inject_cmd_tmst) > inject_cmd_delay:
+                        send_ctrl.inject_cmd_put(inject_cmd)
+                        inject_cmd_tmst_tab[i] = datetime.now()
+
+            time.sleep(0.25)
     except Exception as ex_msg:
         print('err main', ex_msg)
     except KeyboardInterrupt: # Exception 不能捕获KeyboardInterrupt
@@ -422,8 +477,7 @@ def task_run():
     finally:
         sport.close()
         sport_read_recorder.close()
-        print('test complete')
-
+        console_print('info', 'test complete')
 
 if __name__ == '__main__':
     colorama.init()
